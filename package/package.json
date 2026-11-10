@@ -1,0 +1,65 @@
+{
+  "name": "dsh-atom",
+  "version": "0.5.0",
+  "description": "企微群文件工作台与对话工具合一：面板预览、勾选、归档、按归档目录建单导出 Excel；对话里配置、读取预览、批量归档、查询与单文件管理",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "type": "module",
+  "main": "index.js",
+  "meta": {
+    "title": "Atom",
+    "description": "企微群文件工作台与对话工具合一：面板预览、勾选、归档、按归档目录建单导出 Excel；对话里配置、读取预览、批量归档、查询与单文件管理"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./lib/client.js",
+    "./typert": "./lib/typert.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "index.js",
+    "lib",
+    "runtime",
+    "vendor",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "使用教程.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-api-remotes"
+      ]
+    }
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "build:client": "node build-client.mjs",
+    "build:order": "node build-order.mjs",
+    "build": "npm run build:client && npm run build:order",
+    "pack": "npm pack --ignore-scripts"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "exceljs": "^4.4.0",
+    "jszip": "^3.10.2",
+    "mammoth": "^1.13.0",
+    "unpdf": "^1.9.1",
+    "zod": "^4.6.7"
+  },
+  "packageManager": "pnpm@11.7.0+sha512.19cc852c120c7125760f2443ee6be0ca5b40f9f50598de1a09a1f177503e010e57c23c77646e01e761de59bf874fb22a3398c33ab9691fc13eb946b6f0f4d620"
+}

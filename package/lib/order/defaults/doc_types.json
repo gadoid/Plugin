@@ -1,0 +1,126 @@
+{
+  "_说明": "单证类型识别词典 — 基于真实样本实证。每类给出正向关键词及权重，负向关键词扣分；得分最高者胜出，低于阈值归「其他业务资料」。",
+  "doc_types": [
+    {
+      "type": "入货通知",
+      "aliases": ["入货通知书", "订舱确认书", "订舱详情", "入货通知"],
+      "positive": [
+        { "kw": "入货通知", "w": 10 },
+        { "kw": "入 货 通 知", "w": 10 },
+        { "kw": "订舱确认书", "w": 9 },
+        { "kw": "订舱详情", "w": 9 },
+        { "kw": "Booking Confirmation", "w": 8 },
+        { "kw": "截港时间", "w": 4 },
+        { "kw": "截单时间", "w": 4 },
+        { "kw": "截港日期", "w": 4 },
+        { "kw": "截单日期", "w": 4 },
+        { "kw": "场站", "w": 3 },
+        { "kw": "背箱", "w": 3 },
+        { "kw": "提箱", "w": 2 },
+        { "kw": "箱型箱量", "w": 2 },
+        { "kw": "船名航次", "w": 2 }
+      ],
+      "negative": ["COMMERCIAL INVOICE", "PACKING LIST", "商业发票", "装箱单", "报关单", "BILL OF LADING"]
+    },
+    {
+      "type": "商业发票",
+      "aliases": ["Commercial Invoice", "发票"],
+      "positive": [
+        { "kw": "COMMERCIAL INVOICE", "w": 12 },
+        { "kw": "COMMERCIALINVOICE", "w": 12 },
+        { "kw": "商 业 发 票", "w": 12 },
+        { "kw": "商业发票", "w": 10 },
+        { "kw": "Invoice No", "w": 5 },
+        { "kw": "发票编号", "w": 5 },
+        { "kw": "Unit Price", "w": 4 },
+        { "kw": "单  价", "w": 3 },
+        { "kw": "总  价", "w": 3 },
+        { "kw": "SAY TOTAL", "w": 3 },
+        { "kw": "Amount", "w": 2 }
+      ],
+      "negative": ["PACKING LIST", "装箱单", "BILL OF LADING", "报关单"]
+    },
+    {
+      "type": "装箱单",
+      "aliases": ["Packing List", "箱单"],
+      "positive": [
+        { "kw": "PACKING LIST", "w": 12 },
+        { "kw": "PACKINGLIST", "w": 12 },
+        { "kw": "PACKING/STOWANGE LIST", "w": 12 },
+        { "kw": "P A C K I N G", "w": 10 },
+        { "kw": "装 箱 单", "w": 12 },
+        { "kw": "装箱单", "w": 10 },
+        { "kw": "毛  重", "w": 5 },
+        { "kw": "净  重", "w": 5 },
+        { "kw": "尺  码", "w": 5 },
+        { "kw": "G.W", "w": 3 },
+        { "kw": "N.W", "w": 3 },
+        { "kw": "Measurement", "w": 3 },
+        { "kw": "Container No", "w": 2 }
+      ],
+      "negative": ["COMMERCIAL INVOICE", "商业发票", "BILL OF LADING", "报关单"]
+    },
+    {
+      "type": "报关单",
+      "aliases": ["Customs Declaration"],
+      "positive": [
+        { "kw": "中华人民共和国海关出口货物报关单", "w": 15 },
+        { "kw": "出口货物报关单", "w": 12 },
+        { "kw": "报关单", "w": 8 },
+        { "kw": "申报单位", "w": 4 },
+        { "kw": "监管方式", "w": 4 },
+        { "kw": "境内发货人", "w": 4 },
+        { "kw": "境外收货人", "w": 4 },
+        { "kw": "运抵国", "w": 4 },
+        { "kw": "指运港", "w": 4 },
+        { "kw": "离境口岸", "w": 4 },
+        { "kw": "提运单号", "w": 4 },
+        { "kw": "总毛重", "w": 3 },
+        { "kw": "集装箱标号码", "w": 3 }
+      ],
+      "negative": []
+    },
+    {
+      "type": "提单",
+      "aliases": ["Bill of Lading"],
+      "positive": [
+        { "kw": "BILL OF LADING", "w": 15 },
+        { "kw": "OCEAN BILL OF LADING", "w": 15 },
+        { "kw": "BILLOFLADING", "w": 12 },
+        { "kw": "SHIPPED ON BOARD", "w": 6 },
+        { "kw": "PORT OF DISCHARGE", "w": 5 },
+        { "kw": "PLACE OF RECEIPT", "w": 4 },
+        { "kw": "SHIPPER", "w": 3 },
+        { "kw": "CONSIGNEE", "w": 3 },
+        { "kw": "NOTIFY PARTY", "w": 3 },
+        { "kw": "提单", "w": 4 }
+      ],
+      "negative": ["入货通知", "订舱确认书", "订舱详情"]
+    },
+    {
+      "type": "托书",
+      "aliases": ["Booking Note/托书"],
+      "positive": [
+        { "kw": "订舱委托书", "w": 12 },
+        { "kw": "托书", "w": 10 },
+        { "kw": "BOOKING NOTE", "w": 10 },
+        { "kw": "委托书", "w": 6 }
+      ],
+      "negative": []
+    },
+    {
+      "type": "申报要素",
+      "aliases": [],
+      "positive": [
+        { "kw": "申报要素", "w": 12 },
+        { "kw": "品牌类型", "w": 6 },
+        { "kw": "出口享惠情况", "w": 6 },
+        { "kw": "GTIN", "w": 4 },
+        { "kw": "CAS", "w": 3 }
+      ],
+      "negative": []
+    }
+  ],
+  "min_score": 8,
+  "fallback_type": "其他业务资料"
+}
