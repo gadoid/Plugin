@@ -4,13 +4,19 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import WecomFiles from './lib/service.js'
 import { createRemoteCall, createTools } from './lib/tools.mjs'
 import { createOrderTools } from './lib/order-tools.mjs'
+import { createLedgerTools } from './lib/ledger-tools.mjs'
+import { createDashboardTools } from './lib/dashboard-tools.mjs'
 import { OrderRunner, builtinDictionary, CUSTOM_FIELD_LIMIT, DICTIONARY_VERSION, exportLedgerSheet, readExtraction } from './lib/order/host.bundle.mjs'
-import { LEDGER_MAX_LIMIT, ledgerState } from './lib/ledger-source.mjs'
+import { ledgerState } from './lib/ledger-source.mjs'
+import { readReviewBoxes, readReviewDetail, readReviewPage } from './lib/ledger-review.mjs'
+import { archiveLedger, readAllRows, readBoardState } from './lib/ledger-archive.mjs'
+import { readDashboard, previewDashboardWidget, saveDashboardWidget } from './lib/dashboard-query.mjs'
+import { dashboardState, deleteDashboardWidget, setDashboardWidgetPinned } from './lib/dashboard-store.mjs'
 import { readLedgerView, saveLedgerView } from './lib/ledger-view-state.mjs'
 import { readLedgerLocal, resetLedgerLocal, saveLedgerLocal } from './lib/ledger-local.mjs'
 import {
-  migrateLedgerLocal, readLedgerConfig, resetLedgerReview, restoreLegacyLayout, saveLedgerReview,
-  setLedgerExportExcluded, upsertLedgerFromExtraction, writeLedgerConfig,
+  commitLedgerReview, migrateLedgerLocal, readLedgerConfig, readReviewAudit, resetLedgerReview, restoreLegacyLayout,
+  saveLedgerReview, setLedgerExportExcluded, upsertLedgerFromExtraction, writeLedgerConfig,
 } from './lib/ledger-store.mjs'
 
 /** Atom = archive workbench + archive-to-order pipeline sharing one request surface. */
@@ -24,6 +30,8 @@ export default class Atom extends WecomFiles {
     const call = createRemoteCall(this)
     for (const tool of createTools(defineTool, call)) ctx.tools.register(tool)
     for (const tool of createOrderTools(defineTool, call)) ctx.tools.register(tool)
+    for (const tool of createLedgerTools(defineTool, call)) ctx.tools.register(tool)
+    for (const tool of createDashboardTools(defineTool, call)) ctx.tools.register(tool)
   }
 
   async request(payload) {
@@ -70,6 +78,55 @@ export default class Atom extends WecomFiles {
         return JSON.stringify({ ok: false, code: error.code || 'ledger-review-failed', currentRev: error.currentRev })
       }
     }
+    if (value?.action === 'ledger-review-commit') {
+      try {
+        return JSON.stringify({ ok: true, value: commitLedgerReview(this.workbench.config.stateDirectory, { baseRev: value.baseRev, ids: value.ids }) })
+      } catch (error) {
+        return JSON.stringify({ ok: false, code: error.code || 'ledger-review-failed', message: error.message, currentRev: error.currentRev })
+      }
+    }
+    if (value?.action === 'ledger-review-detail') {
+      try {
+        return JSON.stringify({ ok: true, value: readReviewDetail(this.workbench.config.stateDirectory, value.id) })
+      } catch (error) {
+        return JSON.stringify({ ok: false, code: error.code || 'ledger-review-failed', message: error.message })
+      }
+    }
+    if (value?.action === 'ledger-review-page') {
+      try {
+        const page = await readReviewPage({
+          stateDirectory: this.workbench.config.stateDirectory,
+          id: value.id, file: value.file, page: value.page, width: value.width,
+        })
+        return JSON.stringify({ ok: true, value: page })
+      } catch (error) {
+        return JSON.stringify({ ok: false, code: error.code || 'ledger-review-failed', message: error.message })
+      }
+    }
+    if (value?.action === 'ledger-review-boxes') {
+      try {
+        const boxes = await readReviewBoxes(
+          this.workbench.config.stateDirectory, value.id, value.file, value.page,
+        )
+        return JSON.stringify({ ok: true, value: boxes })
+      } catch (error) {
+        return JSON.stringify({ ok: false, code: error.code || 'ledger-review-failed', message: error.message })
+      }
+    }
+    if (value?.action === 'ledger-audit') {
+      try {
+        const audit = readReviewAudit(this.workbench.config.stateDirectory)
+        const ticket = typeof value.ticket === 'string' ? value.ticket.trim() : ''
+        const kind = typeof value.kind === 'string' ? value.kind.trim() : ''
+        const limit = Math.min(200, Math.max(1, Math.round(Number(value.limit) || 50)))
+        let events = audit.events
+        if (ticket) events = events.filter(event => event?.ticket === ticket)
+        if (kind) events = events.filter(event => event?.action === kind)
+        return JSON.stringify({ ok: true, value: { version: audit.version, total: events.length, events: events.slice(-limit) } })
+      } catch (error) {
+        return JSON.stringify({ ok: false, code: error.code || 'ledger-audit-failed' })
+      }
+    }
     if (value?.action === 'ledger-review-reset') {
       try {
         return JSON.stringify({ ok: true, value: resetLedgerReview(this.workbench.config.stateDirectory, { baseRev: value.baseRev, id: value.id, keys: value.keys }) })
@@ -91,6 +148,7 @@ export default class Atom extends WecomFiles {
         if (!config) return JSON.stringify({ ok: false, code: 'ledger-unconfigured' })
         const job = await this.orders.build(value.directory, {
           force: value.force === true, fields: config.fields, mode: 'ledger', exportOrder: false,
+          ingest: ({ runId }) => this.ingestLedgerRun(runId),
         })
         return JSON.stringify({ ok: true, value: { job } })
       } catch (error) {
@@ -99,19 +157,66 @@ export default class Atom extends WecomFiles {
     }
     if (value?.action === 'ledger-ingest') {
       try {
-        const stateDirectory = this.workbench.config.stateDirectory
-        const extraction = await readExtraction(stateDirectory, value.runId)
-        if (!extraction) return JSON.stringify({ ok: false, code: 'ledger-extraction-missing' })
-        return JSON.stringify({ ok: true, value: upsertLedgerFromExtraction(stateDirectory, extraction) })
+        return JSON.stringify({ ok: true, value: await this.ingestLedgerRun(value.runId) })
       } catch (error) {
-        return JSON.stringify({ ok: false, code: error.code || 'ledger-ingest-failed' })
+        return JSON.stringify({ ok: false, code: error.code || 'ledger-ingest-failed', message: error.message })
+      }
+    }
+    if (value?.action === 'ledger-archive') {
+      try {
+        return JSON.stringify({ ok: true, value: archiveLedger(this.workbench.config.stateDirectory) })
+      } catch (error) {
+        return JSON.stringify({ ok: false, code: error.code || 'ledger-archive-failed' })
+      }
+    }
+    if (value?.action === 'ledger-dashboard') {
+      try {
+        return JSON.stringify({ ok: true, value: readDashboard(this.workbench.config.stateDirectory, { scope: value.scope ?? value.month }) })
+      } catch (error) {
+        return JSON.stringify({ ok: false, code: error.code || 'ledger-board-failed', message: error.message })
+      }
+    }
+    if (value?.action === 'ledger-dashboard-preview') {
+      try {
+        return JSON.stringify({ ok: true, value: previewDashboardWidget(this.workbench.config.stateDirectory, { widget: value.widget, scope: value.scope }) })
+      } catch (error) {
+        return JSON.stringify({ ok: false, code: error.code || 'ledger-board-failed', message: error.message })
+      }
+    }
+    if (value?.action === 'ledger-dashboard-save') {
+      try {
+        return JSON.stringify({ ok: true, value: saveDashboardWidget(this.workbench.config.stateDirectory, { id: value.id, widget: value.widget }) })
+      } catch (error) {
+        return JSON.stringify({ ok: false, code: error.code || 'ledger-board-failed', message: error.message })
+      }
+    }
+    if (value?.action === 'ledger-dashboard-delete') {
+      try {
+        return JSON.stringify({ ok: true, value: deleteDashboardWidget(this.workbench.config.stateDirectory, value.id) })
+      } catch (error) {
+        return JSON.stringify({ ok: false, code: error.code || 'ledger-board-failed', message: error.message })
+      }
+    }
+    if (value?.action === 'ledger-dashboard-pin') {
+      try {
+        return JSON.stringify({ ok: true, value: setDashboardWidgetPinned(this.workbench.config.stateDirectory, value.id, { pinned: value.pinned !== false }) })
+      } catch (error) {
+        return JSON.stringify({ ok: false, code: error.code || 'ledger-board-failed', message: error.message })
+      }
+    }
+    if (value?.action === 'ledger-board-state') {
+      try {
+        const stateDirectory = this.workbench.config.stateDirectory
+        return JSON.stringify({ ok: true, value: { revision: `${readBoardState(stateDirectory).revision}:${dashboardState(stateDirectory)}` } })
+      } catch (error) {
+        return JSON.stringify({ ok: false, code: error.code || 'ledger-board-failed' })
       }
     }
     if (value?.action === 'ledger-export') {
       try {
         const stateDirectory = this.workbench.config.stateDirectory
         const excluded = setLedgerExportExcluded(stateDirectory, value.exclude)
-        const state = ledgerState({ stateDirectory, offset: 0, limit: LEDGER_MAX_LIMIT })
+        const state = readAllRows(stateDirectory)
         const indexByKey = new Map(state.columns.map((column, index) => [column.key, index]))
         const columns = state.columns.filter(column => !excluded.includes(column.key))
         if (!columns.length) return JSON.stringify({ ok: false, code: 'ledger-export-empty' })
@@ -165,6 +270,24 @@ export default class Atom extends WecomFiles {
       } catch { /* A failed auto-build must never fail the archive result. */ }
     }
     return result
+  }
+
+  /** 入账唯一入口：识别完成回调与手动补写共用；重复执行不产生额外变更。 */
+  async ingestLedgerRun(runId) {
+    const stateDirectory = this.workbench.config.stateDirectory
+    try {
+      const extraction = await readExtraction(stateDirectory, runId)
+      if (!extraction) throw Object.assign(new Error('缺少识别结果'), { code: 'ledger-extraction-missing' })
+      const result = upsertLedgerFromExtraction(stateDirectory, extraction)
+      try { archiveLedger(stateDirectory) } catch { /* 归档失败保留热窗，下次再移 */ }
+      await this.orders.markIngested(runId, {
+        status: 'done', at: Date.now(), rev: result.rev, rows: result.rows, cells: result.cells,
+      })
+      return result
+    } catch (error) {
+      await this.orders.markIngested(runId, { status: 'failed', at: Date.now() }, error.message || '').catch(() => {})
+      throw error
+    }
   }
 
   async orderAction(request) {

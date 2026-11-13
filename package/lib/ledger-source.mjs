@@ -65,7 +65,7 @@ export function ledgerRows(stateDirectory) {
     row.savedAt = Math.max(row.savedAt, Number(entry.savedAt) || 0)
     directories.set(key, row)
   }
-  return [...directories.values()]
+  const tickets = [...directories.values()]
     .sort((left, right) => right.savedAt - left.savedAt || left.directory.localeCompare(right.directory))
     .map((row) => ({
       id: path.basename(row.directory),
@@ -75,6 +75,13 @@ export function ledgerRows(stateDirectory) {
       savedAt: row.savedAt,
       fileCount: row.fileCount,
     }))
+  // 一票 = 一个票 ID（目录名）：同一票重复保存到多个日期目录时只保留最近一次。
+  const seen = new Set()
+  return tickets.filter((ticket) => {
+    if (seen.has(ticket.id)) return false
+    seen.add(ticket.id)
+    return true
+  })
 }
 
 export function ledgerState({ stateDirectory, offset, limit, local } = {}) {
@@ -122,7 +129,10 @@ function metaValue(ticket, key) {
   return ''
 }
 
-/** 完整度按必填字段的显示值覆盖计算；核对状态只看必填字段是否都有人工复核值。 */
+/**
+ * 完整度按必填字段的显示值覆盖计算。
+ * 核对状态以显式确认为准；老数据没有 confirmedAt，沿用「必填字段均有人工复核值」的旧口径。
+ */
 function rowSummary(config, row) {
   const stored = row?.values || {}
   const review = row?.review || {}
@@ -136,9 +146,16 @@ function rowSummary(config, row) {
   for (const [key, cell] of Object.entries(review)) {
     if (cell?.newer !== undefined) newer[key] = true
   }
+  const legacyReviewed = required.length > 0 && reviewed === required.length
+  const confirmed = row != null && Object.prototype.hasOwnProperty.call(row, 'confirmedAt')
+    ? Number(row.confirmedAt) > 0
+    : legacyReviewed
   return {
     completeness: required.length ? Math.round((filled / required.length) * 100) : 100,
-    status: !anyValue ? '未识别' : stale ? '待重识别' : required.length > 0 && reviewed === required.length ? '已核对' : '待核对',
+    status: !anyValue ? '未识别'
+      : stale ? '待重识别'
+      : confirmed && !Object.keys(newer).length ? '已核对'
+      : '待核对',
     newer,
   }
 }

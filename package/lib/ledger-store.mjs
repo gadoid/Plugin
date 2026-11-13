@@ -335,7 +335,7 @@ function sanitizeRow(raw, id) {
     const clean = sanitizeReviewValue(value)
     if (clean) review[key] = clean
   }
-  return {
+  const row = {
     id,
     directory: cleanName(raw.directory, 1000),
     values,
@@ -343,6 +343,9 @@ function sanitizeRow(raw, id) {
     status: typeof raw.status === 'string' ? raw.status.slice(0, 40) : '',
     updatedAt: Number(raw.updatedAt) > 0 ? Number(raw.updatedAt) : 0,
   }
+  // 缺省与「显式未确认」必须可区分：老行没有字段，沿用旧口径推导；新写入的行一律落 0 或时间戳。
+  if (Object.prototype.hasOwnProperty.call(raw, 'confirmedAt')) row.confirmedAt = Number(raw.confirmedAt) > 0 ? Number(raw.confirmedAt) : 0
+  return row
 }
 
 export function readLedger(stateDirectory) {
@@ -402,6 +405,7 @@ export function readReviewAudit(stateDirectory) {
 /**
  * 识别结果入库：只更新识别值，人工复核值（review）永不覆盖。
  * 空值不擦除旧值，避免一次失败/漏识别清空台账。
+ * 重复入库同一份结果不升 rev、不追加审计，供中断后补写使用。
  */
 export function upsertLedgerFromExtraction(stateDirectory, extraction, { now = Date.now() } = {}) {
   const config = readLedgerConfig(stateDirectory)
@@ -411,13 +415,22 @@ export function upsertLedgerFromExtraction(stateDirectory, extraction, { now = D
   const ledger = readLedger(stateDirectory)
   const rows = {}
   for (const [id, row] of Object.entries(ledger.rows)) rows[id] = { ...row, values: { ...row.values }, review: { ...row.review } }
+  const runId = cleanName(extraction.runId, ID_MAX)
   let cells = 0
+  let touched = 0
   for (const group of extraction.groups) {
     const directory = cleanName(group.directory || extraction.directory, 1000)
     const id = ticketIdOf(directory) || cleanName(group.label, ID_MAX)
     if (!id) continue
-    const row = rows[id] || { id, directory, values: {}, review: {}, status: '', updatedAt: 0 }
-    if (directory) row.directory = directory
+    const existing = rows[id]
+    const row = existing || { id, directory, values: {}, review: {}, status: '', updatedAt: 0 }
+    let changed = !existing
+    // 只有识别值真的变了才撤销确认；同一结果补写（run_id 变化但值相同）不该打断已核对。
+    let reopened = false
+    if (directory && row.directory !== directory) {
+      row.directory = directory
+      changed = true
+    }
     for (const value of group.values || []) {
       if (!fieldKeys.has(value.key)) continue
       const clean = cleanValue(value.value)
@@ -428,37 +441,57 @@ export function upsertLedgerFromExtraction(stateDirectory, extraction, { now = D
           if (reviewed.newer !== undefined) {
             const { newer, newer_at, newer_run_id, ...rest } = reviewed
             row.review[value.key] = rest
+            changed = true
           }
-        } else {
+        } else if (String(reviewed.newer ?? '') !== String(clean) || reviewed.newer_run_id !== runId) {
           row.review[value.key] = {
             ...reviewed,
             newer: clean,
             newer_at: nowMs(now),
-            newer_run_id: cleanName(extraction.runId, ID_MAX),
+            newer_run_id: runId,
           }
+          reopened = true
+          changed = true
         }
       }
-      row.values[value.key] = {
-        value: clean,
-        run_id: cleanName(extraction.runId, ID_MAX),
-        confidence: Number.isFinite(Number(value.confidence)) ? Number(value.confidence) : null,
-        source_file: cleanName(value.source_file, 260),
-        status: cleanName(value.status, 40),
-        at: nowMs(now),
+      const previous = row.values[value.key]
+      if (!previous || String(previous.value) !== String(clean) || previous.run_id !== runId) {
+        if (previous && String(previous.value) !== String(clean)) reopened = true
+        row.values[value.key] = {
+          value: clean,
+          run_id: runId,
+          confidence: Number.isFinite(Number(value.confidence)) ? Number(value.confidence) : null,
+          source_file: cleanName(value.source_file, 260),
+          status: cleanName(value.status, 40),
+          at: nowMs(now),
+        }
+        cells += 1
+        changed = true
       }
-      cells += 1
     }
-    row.status = Object.keys(row.review).length ? 'edited' : 'recognized'
-    row.updatedAt = nowMs(now)
-    rows[id] = row
+    if (reopened && Number(row.confirmedAt) > 0) {
+      row.confirmedAt = 0
+      changed = true
+    }
+    const status = Object.keys(row.review).length ? 'edited' : 'recognized'
+    if (row.status !== status) {
+      row.status = status
+      changed = true
+    }
+    if (changed) {
+      row.updatedAt = nowMs(now)
+      rows[id] = row
+      touched += 1
+    }
   }
+  if (!touched) return { rev: ledger.rev, rows: Object.keys(rows).length, cells: 0, changed: false }
   const next = { version: LEDGER_VERSION, rev: ledger.rev + 1, updatedAt: nowMs(now), rows }
   writeLedger(stateDirectory, next)
   appendAudit(stateDirectory, [{
     version: REVIEW_VERSION, at: nowMs(now), rev: next.rev, action: 'recognize',
-    run_id: cleanName(extraction.runId, ID_MAX), cells,
+    run_id: runId, cells,
   }])
-  return { rev: next.rev, rows: Object.keys(rows).length, cells }
+  return { rev: next.rev, rows: Object.keys(rows).length, cells, changed: true }
 }
 
 /** 人工复核写入：baseRev 不匹配时返回 confilct，由客户端刷新后重试。 */
@@ -486,6 +519,8 @@ export function saveLedgerReview(stateDirectory, { baseRev, changes, now = Date.
     const before = row.review[key] ? row.review[key].value : (row.values[key]?.value ?? '')
     row.review[key] = { value, edited_at: nowMs(now), source: 'manual', base_rev: ledger.rev }
     row.status = 'edited'
+    // 改了任何一个字段都要重新确认，哪怕必填字段恰好都被复核过。
+    row.confirmedAt = 0
     row.updatedAt = nowMs(now)
     rows[id] = row
     events.push({
@@ -499,6 +534,41 @@ export function saveLedgerReview(stateDirectory, { baseRev, changes, now = Date.
   return { rev: next.rev, savedAt: nowMs(now), count: events.length }
 }
 
+/**
+ * 显式核对确认：把票从「待核对」推到「已核对」。
+ * 只认人工动作，不靠「必填字段恰好都有复核值」推断；确认后任何改值、撤销、识别出新值都会失效。
+ */
+export function commitLedgerReview(stateDirectory, { baseRev, ids, now = Date.now() } = {}) {
+  const config = readLedgerConfig(stateDirectory)
+  if (!config) throw fail('ledger-unconfigured', '尚未创建台账')
+  const ledger = readLedger(stateDirectory)
+  if (baseRev !== undefined && baseRev !== null && Number(baseRev) !== ledger.rev) throw conflict(ledger.rev)
+  if (!Array.isArray(ids) || !ids.length || ids.length > MAX_CHANGES) throw fail('ledger-invalid', '核对目标不合法')
+  const rows = {}
+  for (const [id, row] of Object.entries(ledger.rows)) rows[id] = { ...row, values: { ...row.values }, review: { ...row.review } }
+  const events = []
+  const confirmedAt = nowMs(now)
+  for (const rawId of ids) {
+    const id = typeof rawId === 'string' ? rawId.trim() : ''
+    if (!id || id.length > ID_MAX) throw fail('ledger-invalid', '核对目标不合法')
+    const row = rows[id]
+    if (!row) throw fail('ledger-invalid', '该票尚未识别，无法核对')
+    if (Object.values(row.review || {}).some(cell => cell?.newer !== undefined)) {
+      throw fail('ledger-review-pending', '仍有新识别结果待处理')
+    }
+    if (Number(row.confirmedAt) > 0) continue
+    row.confirmedAt = confirmedAt
+    row.updatedAt = confirmedAt
+    rows[id] = row
+    events.push({ version: REVIEW_VERSION, at: confirmedAt, rev: ledger.rev + 1, action: 'confirm', ticket: id })
+  }
+  if (!events.length) return { rev: ledger.rev, confirmedAt: 0, count: 0 }
+  const next = { version: LEDGER_VERSION, rev: ledger.rev + 1, updatedAt: confirmedAt, rows }
+  writeLedger(stateDirectory, next)
+  appendAudit(stateDirectory, events)
+  return { rev: next.rev, confirmedAt, count: events.length }
+}
+
 /** 撤销复核值；不传 keys 时撤销该票全部字段，不传 id 时撤销整张台账。 */
 export function resetLedgerReview(stateDirectory, { baseRev, id, keys, now = Date.now() } = {}) {
   const ledger = readLedger(stateDirectory)
@@ -509,12 +579,16 @@ export function resetLedgerReview(stateDirectory, { baseRev, id, keys, now = Dat
   for (const [rowId, row] of Object.entries(ledger.rows)) {
     if (id && rowId !== id) { rows[rowId] = row; continue }
     const review = { ...row.review }
+    let touched = false
     for (const key of Object.keys(review)) {
       if (targetKeys && !targetKeys.has(key)) continue
       delete review[key]
       removed += 1
+      touched = true
     }
-    rows[rowId] = { ...row, review, status: Object.keys(review).length ? 'edited' : (Object.keys(row.values).length ? 'recognized' : '') }
+    rows[rowId] = touched
+      ? { ...row, review, status: Object.keys(review).length ? 'edited' : (Object.keys(row.values).length ? 'recognized' : ''), confirmedAt: 0 }
+      : row
   }
   if (!removed) return { rev: ledger.rev, count: 0 }
   const next = { version: LEDGER_VERSION, rev: ledger.rev + 1, updatedAt: nowMs(now), rows }

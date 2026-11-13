@@ -127106,6 +127106,104 @@ async function renderPdfImages(filePath, maxPages = runtime.maxPages) {
     return [];
   }
 }
+async function renderDocumentPage(filePath, page = 1, { maxEdge = 1800 } = {}) {
+  const image = readImageFile(filePath);
+  if (image) return { ...image, page: 1, pages: 1, width: null, height: null };
+  if (path.extname(filePath).toLowerCase() !== ".pdf") return null;
+  try {
+    const { getDocumentProxy: getDocumentProxy2, createIsomorphicCanvasFactory: createIsomorphicCanvasFactory2 } = await Promise.resolve().then(() => (init_dist(), dist_exports));
+    const doc = await getDocumentProxy2(new Uint8Array(fs2.readFileSync(filePath)), cmapOptions());
+    const total = doc.numPages;
+    const index = Math.min(Math.max(1, Math.round(Number(page) || 1)), total);
+    const source = await doc.getPage(index);
+    const base = source.getViewport({ scale: 1 });
+    const edge = Number.isFinite(Number(maxEdge)) ? Math.min(2400, Math.max(600, Number(maxEdge))) : 1800;
+    const scale = Math.min(runtime.pdfScale, MAX_EDGE / Math.max(base.width, base.height), edge / Math.max(base.width, base.height));
+    const viewport = source.getViewport({ scale });
+    const Factory = await createIsomorphicCanvasFactory2(canvasImport);
+    const factory = new Factory();
+    const { canvas, context } = factory.create(viewport.width, viewport.height);
+    try {
+      await source.render({ canvas, canvasContext: context, viewport }).promise;
+      const buf = await canvas.encode("jpeg", 82);
+      return {
+        data: new Uint8Array(buf),
+        mediaType: "image/jpeg",
+        name: `page-${index}.jpg`,
+        page: index,
+        pages: total,
+        width: Math.round(viewport.width),
+        height: Math.round(viewport.height)
+      };
+    } finally {
+      factory.destroy({ canvas, context });
+    }
+  } catch {
+    return null;
+  }
+}
+var itemCache = /* @__PURE__ */ new Map();
+var ITEM_CACHE_LIMIT = 24;
+async function readPdfPageItems(filePath, page = 1) {
+  if (path.extname(filePath).toLowerCase() !== ".pdf") return null;
+  let stamp2 = 0;
+  try {
+    stamp2 = fs2.statSync(filePath).mtimeMs;
+  } catch {
+    return null;
+  }
+  const key = `${filePath}|${page}|${stamp2}`;
+  const cached = itemCache.get(key);
+  if (cached) return cached;
+  try {
+    const { getDocumentProxy: getDocumentProxy2 } = await Promise.resolve().then(() => (init_dist(), dist_exports));
+    const doc = await getDocumentProxy2(new Uint8Array(fs2.readFileSync(filePath)), cmapOptions());
+    const total = doc.numPages;
+    const index = Math.min(Math.max(1, Math.round(Number(page) || 1)), total);
+    const source = await doc.getPage(index);
+    const viewport = source.getViewport({ scale: 1 });
+    const content = await source.getTextContent();
+    const items = [];
+    for (const item of content.items || []) {
+      const str = typeof item?.str === "string" ? item.str : "";
+      const transform = Array.isArray(item?.transform) ? item.transform : null;
+      if (!str || !transform) continue;
+      const [a2, b2, c2, d2, e2, f2] = transform;
+      const size2 = Math.hypot(c2, d2);
+      const advance = Number(item.width) || 0;
+      const base = Math.hypot(a2, b2) || 1;
+      const ux = a2 / base;
+      const uy = b2 / base;
+      const upX = -uy;
+      const upY = ux;
+      const p0 = viewport.convertToViewportPoint(e2, f2);
+      const p1 = viewport.convertToViewportPoint(e2 + ux * advance, f2 + uy * advance);
+      const p2 = viewport.convertToViewportPoint(e2 + upX * size2, f2 + upY * size2);
+      const p3 = viewport.convertToViewportPoint(e2 + ux * advance + upX * size2, f2 + uy * advance + upY * size2);
+      const left = Math.max(0, Math.min(p0[0], p1[0], p2[0], p3[0]));
+      const right = Math.min(viewport.width, Math.max(p0[0], p1[0], p2[0], p3[0]));
+      const top = Math.max(0, Math.min(p0[1], p1[1], p2[1], p3[1]));
+      const bottom = Math.min(viewport.height, Math.max(p0[1], p1[1], p2[1], p3[1]));
+      if (!(right > left) || !(bottom > top)) continue;
+      items.push({
+        str,
+        x: left,
+        y: top,
+        w: right - left,
+        h: bottom - top,
+        size: size2 || bottom - top,
+        eol: item.hasEOL === true,
+        dir: String(item.dir || "")
+      });
+    }
+    const result2 = { page: index, pages: total, width: viewport.width, height: viewport.height, items };
+    itemCache.set(key, result2);
+    if (itemCache.size > ITEM_CACHE_LIMIT) itemCache.delete(itemCache.keys().next().value);
+    return result2;
+  } catch {
+    return null;
+  }
+}
 function cmapOptions() {
   const candidates = [
     path.join(here, "defaults", "cmaps"),
@@ -127458,7 +127556,6 @@ var SHAPE_VALIDATORS = {
   pol_country: isValidCountryField,
   pod_country: isValidCountryField,
   dest_country: isValidCountryField,
-  transship_country: isValidCountryField,
   // 新增识别字段：宽松校验，只拦明显脏数据
   freight_currency: (v2) => /^[A-Z]{3}$/i.test((v2 || "").trim()),
   transship_country: (v2) => {
@@ -128375,20 +128472,26 @@ async function parseDocViaConvert(filePath) {
   return { text: "", layout: null, warning: ".doc \u8F6C\u6362\u5931\u8D25\uFF08LibreOffice \u672A\u4EA7\u51FA\u6587\u4EF6\uFF09" };
 }
 async function parseXlsx(filePath) {
+  if (path3.extname(filePath).toLowerCase() === ".xls") {
+    return { text: "", layout: null, warning: "\u65E7\u7248 .xls \u6682\u4E0D\u652F\u6301\u89E3\u6790\uFF0C\u8BF7\u53E6\u5B58\u4E3A .xlsx \u540E\u91CD\u8BD5" };
+  }
   try {
-    const mod = await import("xlsx");
-    const XLSX = mod.default || mod;
-    const utils = XLSX.utils || mod.utils;
-    const wb = (XLSX.readFile || XLSX.readFileSync || mod.readFile)(filePath);
+    const excelModule = await Promise.resolve().then(() => __toESM(require_excel(), 1));
+    const ExcelJS = excelModule.default || excelModule;
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.readFile(filePath);
     const rows = [];
-    for (const sn2 of wb.SheetNames) {
-      const data = utils.sheet_to_json(wb.Sheets[sn2], { header: 1, defval: "" });
-      rows.push(`--- ${sn2} ---`);
-      for (const row of data) {
-        const line = row.filter((c2) => c2 !== "" && c2 != null).join("   ");
-        if (line.trim()) rows.push(line);
-      }
-    }
+    workbook.eachSheet((sheet) => {
+      rows.push(`--- ${sheet.name} ---`);
+      sheet.eachRow({ includeEmpty: false }, (row) => {
+        const cells = [];
+        row.eachCell({ includeEmpty: false }, (cell) => {
+          const text = String(cell.text ?? "").trim();
+          if (text) cells.push(text);
+        });
+        if (cells.length) rows.push(cells.join("   "));
+      });
+    });
     return { text: rows.join("\n"), layout: null, warning: "" };
   } catch (e2) {
     return { text: "", layout: null, warning: `XLSX\u89E3\u6790\u5931\u8D25: ${e2.message}` };
@@ -128550,38 +128653,11 @@ function groupByBlNoFolder(classifiedDocs) {
   }
   return result2;
 }
-var FIELD_TO_STD = {
-  "\u4E0B\u5355\u5BA2\u6237\u540D\u79F0": { std: "issuer" },
-  "\u63D0\u5355\u53F7": { std: "bl_no" },
-  "\u4E1A\u52A1\u7C7B\u578B": { std: "cargo_type" },
-  "\u6210\u4EA4\u65B9\u5F0F": { std: "trade_term" },
-  "\u627F\u8FD0\u4EBA": { std: "carrier" },
-  "\u9884\u8BA1\u5F00\u822A\uFF08ETD\uFF09": { std: "etd" },
-  "\u8239\u540D": { std: "vessel", transform: "vessel" },
-  "\u822A\u6B21": { std: "voyage", transform: "voyage" },
-  "\u8D77\u8FD0\u6E2F": { std: "pol" },
-  "\u8D77\u8FD0\u6E2F\u56FD\u5BB6": { std: "pol_country" },
-  "\u5378\u8D27\u6E2F": { std: "pod" },
-  "\u5378\u8D27\u6E2F\u56FD\u5BB6": { std: "pod_country" },
-  "\u76EE\u7684\u5730": { std: "dest" },
-  "\u76EE\u7684\u6E2F\u56FD\u5BB6": { std: "dest_country" },
-  "\u5BA2\u6237\u5355\u53F7": { std: "po_no" },
-  "\u4EF6\u6570": { std: "package_qty" },
-  "\u6BDB\u91CD": { std: "gross_weight" },
-  "\u4F53\u79EF": { std: "volume" },
-  "\u96C6\u88C5\u7BB1\u4FE1\u606F": { std: "container_qty_type" },
-  "\u53D1\u8D27\u4EBA": { std: "shipper" },
-  "\u6536\u8D27\u4EBA": { std: "consignee" },
-  "\u901A\u77E5\u4EBA": { std: "notify_party" },
-  "\u551B\u5934": { std: "marks" },
-  "\u54C1\u540D": { std: "cargo_desc" },
-  // 规则更新后新增的识别字段
-  "\u6D77\u8FD0\u8D39\u5E01\u5236": { std: "freight_currency" },
-  "\u4E2D\u8F6C\u6E2F": { std: "transship_port" },
-  "\u4E2D\u8F6C\u6E2F\u56FD\u5BB6": { std: "transship_country" },
-  "\u8FD0\u8F93\u6761\u6B3E": { std: "transport_terms" },
-  "\u4ED8\u6B3E\u65B9\u5F0F": { std: "payment_terms" }
-};
+var FIELD_TO_STD = Object.fromEntries(BUILTIN_FIELD_DEFINITIONS.map((field) => {
+  const entry = { std: field.key };
+  if (field.normalizer === "vessel" || field.normalizer === "voyage") entry.transform = field.normalizer;
+  return [field.name, entry];
+}));
 function getService(ctx, name) {
   try {
     if (typeof ctx?.get === "function") {
@@ -129375,39 +129451,8 @@ var FIELD_CATEGORY = {
 };
 for (const k2 of ["\u62A5\u5173\u4F9B\u5E94\u5546", "\u8231\u5355\u4F9B\u5E94\u5546", "\u4FDD\u9669\u4F9B\u5E94\u5546", "\u62D6\u8F66\u4F9B\u5E94\u5546", "\u62D6\u8F66\u670D\u52A1\u4EBA\u5458", "\u5907\u6CE8", "\u5B9E\u9645\u5F00\u822A\uFF08ATD\uFF09", "\u7ED3\u6C47\u65B9\u5F0F", "\u8D27\u7269\u7C7B\u578B", "\u5305\u88C5", "\u6258\u4E66\u5907\u6CE8", "\u88C5\u8FD0\u6761\u6B3E"]) FIELD_CATEGORY[k2] = "skip";
 for (const k2 of ["\u6D77\u8FD0\u8D39\u5E01\u5236", "\u5BA2\u6237\u5355\u53F7", "\u4E2D\u8F6C\u6E2F", "\u4E2D\u8F6C\u6E2F\u56FD\u5BB6", "\u8FD0\u8F93\u6761\u6B3E", "\u4ED8\u6B3E\u65B9\u5F0F"]) FIELD_CATEGORY[k2] = "ai";
-var NULLABLE_FIELDS = /* @__PURE__ */ new Set(["\u5BA2\u6237\u5355\u53F7", "\u4E2D\u8F6C\u6E2F", "\u4E2D\u8F6C\u6E2F\u56FD\u5BB6", "\u8FD0\u8F93\u6761\u6B3E", "\u4ED8\u6B3E\u65B9\u5F0F", "\u6D77\u8FD0\u8D39\u5E01\u5236", "\u901A\u77E5\u4EBA"]);
-var AI_FIELDS = [
-  "\u4E0B\u5355\u5BA2\u6237\u540D\u79F0",
-  "\u63D0\u5355\u53F7",
-  "\u4E1A\u52A1\u7C7B\u578B",
-  "\u6210\u4EA4\u65B9\u5F0F",
-  "\u627F\u8FD0\u4EBA",
-  "\u9884\u8BA1\u5F00\u822A\uFF08ETD\uFF09",
-  "\u8239\u540D",
-  "\u822A\u6B21",
-  "\u8D77\u8FD0\u6E2F",
-  "\u8D77\u8FD0\u6E2F\u56FD\u5BB6",
-  "\u5378\u8D27\u6E2F",
-  "\u5378\u8D27\u6E2F\u56FD\u5BB6",
-  "\u76EE\u7684\u5730",
-  "\u76EE\u7684\u6E2F\u56FD\u5BB6",
-  "\u5BA2\u6237\u5355\u53F7",
-  "\u4EF6\u6570",
-  "\u6BDB\u91CD",
-  "\u4F53\u79EF",
-  "\u96C6\u88C5\u7BB1\u4FE1\u606F",
-  "\u53D1\u8D27\u4EBA",
-  "\u6536\u8D27\u4EBA",
-  "\u901A\u77E5\u4EBA",
-  "\u551B\u5934",
-  "\u54C1\u540D",
-  "\u6D77\u8FD0\u8D39\u5E01\u5236",
-  "\u4E2D\u8F6C\u6E2F",
-  "\u4E2D\u8F6C\u6E2F\u56FD\u5BB6",
-  "\u8FD0\u8F93\u6761\u6B3E",
-  "\u4ED8\u6B3E\u65B9\u5F0F"
-];
-var REQUIRED_FIELDS = new Set(AI_FIELDS.filter((n2) => !NULLABLE_FIELDS.has(n2)));
+var NULLABLE_FIELDS = new Set(BUILTIN_FIELD_DEFINITIONS.filter((f2) => f2.nullable).map((f2) => f2.name));
+var REQUIRED_FIELDS = new Set(BUILTIN_FIELD_DEFINITIONS.filter((f2) => f2.required).map((f2) => f2.name));
 function fieldValue(f2) {
   if (!f2) return "";
   return ((f2.manualOverride ? f2.manualValue ?? "" : f2.value ?? "") || "").trim();
@@ -129699,6 +129744,68 @@ function applyFreightCurrencyFallback(fields) {
   cur.statusLabel = "\u4F4E\u53EF\u4FE1\u5F85\u786E\u8BA4";
   cur.occurrences = [{ value, sourceDoc: "\u89C4\u5219\u9ED8\u8BA4", method: "derived", confidence: 0.5 }];
 }
+function postProcessFields(fields, { group: group2 = null, portCountryMap = null } = {}) {
+  for (const f2 of fields) {
+    if (typeof f2.value === "string" && f2.value) {
+      const cleaned = sanitizeValue(f2.value);
+      if (cleaned !== f2.value) f2.value = cleaned;
+    }
+    if (f2.name === "\u627F\u8FD0\u4EBA") {
+      const before2 = f2.value;
+      const cleaned = cleanCarrierName(before2 || "");
+      if (cleaned && cleaned !== before2) f2.value = cleaned;
+    }
+    if (f2.name === "\u4EF6\u6570" && typeof f2.value === "string" && f2.value) {
+      const iv = toInteger(f2.value);
+      if (iv) f2.value = iv;
+    }
+    if ((f2.name === "\u6BDB\u91CD" || f2.name === "\u4F53\u79EF") && typeof f2.value === "string" && f2.value) {
+      const dec = toDecimal3(f2.value);
+      if (dec) f2.value = dec;
+    }
+    if (["\u8D77\u8FD0\u6E2F\u56FD\u5BB6", "\u4E2D\u8F6C\u6E2F\u56FD\u5BB6", "\u5378\u8D27\u6E2F\u56FD\u5BB6", "\u76EE\u7684\u6E2F\u56FD\u5BB6"].includes(f2.name) && typeof f2.value === "string" && f2.value) {
+      const en2 = normalizeCountry(f2.value);
+      if (en2 && en2 !== f2.value) f2.value = en2;
+    }
+    if (f2.name === "\u96C6\u88C5\u7BB1\u4FE1\u606F" && typeof f2.value === "string" && f2.value) {
+      const formatted = formatContainerInfo(f2.value);
+      if (formatted && formatted !== f2.value) f2.value = formatted;
+    }
+  }
+  applyDestinationFallback(fields);
+  applyCustomerFallback(fields);
+  applyNotifyFallback(fields);
+  applyBlFromFilename(fields, group2);
+  applyFreightCurrencyFallback(fields);
+  applyCargoTypeFallback(fields);
+  applyVoyageFallback(fields);
+  applyPaymentFallback(fields);
+  applyCarrierNote(fields);
+  applyPortCountryFallback(fields, portCountryMap);
+  return fields;
+}
+function buildLedgerFields(group2, fieldDefs = []) {
+  const byKey = /* @__PURE__ */ new Map();
+  for (const f2 of group2?.fields || []) if (f2 && f2.std) byKey.set(f2.std, f2);
+  return fieldDefs.map((def2) => {
+    const found = byKey.get(def2.key);
+    if (found) return { ...found, name: def2.name, required: def2.required === true };
+    return {
+      std: def2.key,
+      name: def2.name,
+      value: "",
+      rawValue: "",
+      confidence: null,
+      sourceFile: "",
+      sourceDoc: "",
+      evidence: "",
+      selectionReason: "",
+      statusLabel: "",
+      method: "missing",
+      required: def2.required === true
+    };
+  });
+}
 function buildOrders(mappedResult, isBatch, extractedDocs, portCountryMap = null) {
   const groups = extractedDocs?._groups || [];
   if (!groups.length) return [];
@@ -129742,42 +129849,8 @@ function buildOrders(mappedResult, isBatch, extractedDocs, portCountryMap = null
     }
     for (const f2 of orderFields) {
       if (!f2.category) f2.category = FIELD_CATEGORY[f2.name] || "ai";
-      if (typeof f2.value === "string" && f2.value) {
-        const cleaned = sanitizeValue(f2.value);
-        if (cleaned !== f2.value) f2.value = cleaned;
-      }
-      if (f2.name === "\u627F\u8FD0\u4EBA") {
-        const before2 = f2.value;
-        const cleaned = cleanCarrierName(before2 || "");
-        if (cleaned && cleaned !== before2) f2.value = cleaned;
-      }
-      if (f2.name === "\u4EF6\u6570" && typeof f2.value === "string" && f2.value) {
-        const iv = toInteger(f2.value);
-        if (iv) f2.value = iv;
-      }
-      if ((f2.name === "\u6BDB\u91CD" || f2.name === "\u4F53\u79EF") && typeof f2.value === "string" && f2.value) {
-        const dec = toDecimal3(f2.value);
-        if (dec) f2.value = dec;
-      }
-      if (["\u8D77\u8FD0\u6E2F\u56FD\u5BB6", "\u4E2D\u8F6C\u6E2F\u56FD\u5BB6", "\u5378\u8D27\u6E2F\u56FD\u5BB6", "\u76EE\u7684\u6E2F\u56FD\u5BB6"].includes(f2.name) && typeof f2.value === "string" && f2.value) {
-        const en2 = normalizeCountry(f2.value);
-        if (en2 && en2 !== f2.value) f2.value = en2;
-      }
-      if (f2.name === "\u96C6\u88C5\u7BB1\u4FE1\u606F" && typeof f2.value === "string" && f2.value) {
-        const formatted = formatContainerInfo(f2.value);
-        if (formatted && formatted !== f2.value) f2.value = formatted;
-      }
     }
-    applyDestinationFallback(orderFields);
-    applyCustomerFallback(orderFields);
-    applyNotifyFallback(orderFields);
-    applyBlFromFilename(orderFields, g2);
-    applyFreightCurrencyFallback(orderFields);
-    applyCargoTypeFallback(orderFields);
-    applyVoyageFallback(orderFields);
-    applyPaymentFallback(orderFields);
-    applyCarrierNote(orderFields);
-    applyPortCountryFallback(orderFields, portCountryMap);
+    postProcessFields(orderFields, { group: g2, portCountryMap });
     orderFields.sort((a2, b2) => ALL_51_FIELDS.indexOf(a2.name) - ALL_51_FIELDS.indexOf(b2.name));
     const blField = orderFields.find((f2) => f2.name === "\u63D0\u5355\u53F7");
     const blValue = blField ? String((blField.manualOverride ? blField.manualValue ?? "" : blField.value ?? "") || "").trim() : "";
@@ -130409,7 +130482,8 @@ var OrderRunner = class {
       jobId: job.id,
       fields: options.fields,
       mode: options.mode,
-      exportOrder: options.exportOrder
+      exportOrder: options.exportOrder,
+      ingest: typeof options.ingest === "function" ? options.ingest : null
     });
     this.drain();
     return this.trim(job);
@@ -130471,12 +130545,21 @@ var OrderRunner = class {
       docs: [],
       orders: [],
       warnings: [],
-      error: ""
+      error: "",
+      ingest: null,
+      ingestError: ""
     };
   }
   async currentJob(directory) {
     await this.ready;
     return this.store.get(directory);
+  }
+  /** 补偿入库后回写任务标记，后续进入页面不再重复补写。 */
+  async markIngested(jobId, ingest, error = "") {
+    await this.ready;
+    const job = this.store.list().find((item) => item.id === jobId);
+    if (!job) return null;
+    return this.trim(this.store.put({ ...job, ingest, ingestError: error }));
   }
   checkDirectory(directory, { mustExist = true } = {}) {
     if (typeof directory !== "string" || !directory.trim()) throw new OrderError("invalid-directory");
@@ -130511,8 +130594,18 @@ var OrderRunner = class {
       this.draining = false;
     }
   }
-  async run({ directory, force, auto, jobId, fields, mode, exportOrder }) {
-    const job = { ...this.store.get(directory) || this.newJob(directory), id: jobId || randomUUID2(), status: "running", step: "scan", progress: 2, startedAt: Date.now(), finishedAt: null };
+  async run({ directory, force, auto, jobId, fields, mode, exportOrder, ingest }) {
+    const job = {
+      ...this.store.get(directory) || this.newJob(directory),
+      id: jobId || randomUUID2(),
+      status: "running",
+      step: "scan",
+      progress: 2,
+      startedAt: Date.now(),
+      finishedAt: null,
+      ingest: null,
+      ingestError: ""
+    };
     const jobMode = mode === "ledger" ? "ledger" : "order";
     const ledgerMode = jobMode === "ledger" || exportOrder === false;
     const recognition = Array.isArray(fields) && fields.length ? { fields, mode: jobMode } : null;
@@ -130571,6 +130664,13 @@ var OrderRunner = class {
       if (failed.length) throw new OrderError("extract-failed", failed[0].llmError || "\u5927\u6A21\u578B\u672A\u8FD4\u56DE\u53EF\u7528\u7ED3\u679C");
       const recognized = extracted._recognition;
       const fieldDefs = recognized?.fields || builtinDictionary().fields;
+      const portCountry = readDefault("port_country.json", { mapping: {} })?.mapping || null;
+      if (ledgerMode) {
+        update({ progress: 82 });
+        for (const g2 of groups) {
+          g2.fields = postProcessFields(buildLedgerFields(g2, fieldDefs), { group: g2, portCountryMap: portCountry });
+        }
+      }
       const extraction = buildExtraction({
         runId: job.id,
         directory,
@@ -130594,22 +130694,49 @@ var OrderRunner = class {
         };
       });
       if (ledgerMode) {
-        update({
-          status: "done",
-          step: "done",
-          progress: 100,
-          finishedAt: Date.now(),
+        const summary2 = {
           outputPath: extractionFile,
           extractionPath: extractionFile,
           orders: missingByGroup,
           mode: jobMode,
           fieldCount: fieldDefs.length,
           warnings: this.store.get(directory)?.warnings || []
-        });
+        };
+        if (jobMode === "ledger" && typeof ingest === "function") {
+          update({ ...summary2, step: "ingest", progress: 98 });
+          try {
+            const result2 = await ingest({ directory, runId: job.id, extractionPath: extractionFile });
+            update({
+              status: "done",
+              step: "done",
+              progress: 100,
+              finishedAt: Date.now(),
+              ingestError: "",
+              ingest: {
+                status: "done",
+                at: Date.now(),
+                rev: Number(result2?.rev) || 0,
+                rows: Number(result2?.rows) || 0,
+                cells: Number(result2?.cells) || 0
+              }
+            });
+          } catch (e2) {
+            update({
+              status: "done",
+              step: "done",
+              progress: 100,
+              finishedAt: Date.now(),
+              ingest: { status: "failed", at: Date.now() },
+              ingestError: e2?.message || String(e2)
+            });
+            this.ctx?.logger?.warn?.(`[atom-order] ${directory}: ledger ingest failed: ${e2?.message || e2}`);
+          }
+          return;
+        }
+        update({ ...summary2, status: "done", step: "done", progress: 100, finishedAt: Date.now() });
         return;
       }
       update({ step: "build", progress: 84 });
-      const portCountry = readDefault("port_country.json", { mapping: {} })?.mapping || null;
       const orders = buildOrders({}, false, extracted, portCountry);
       if (!orders.length) throw new OrderError("extract-empty");
       update({ step: "export", progress: 92 });
@@ -130706,6 +130833,8 @@ export {
   promptHash,
   readConfig,
   readExtraction,
+  readPdfPageItems,
+  renderDocumentPage,
   scanDocuments,
   selectFields,
   validateDictionary,

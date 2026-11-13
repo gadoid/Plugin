@@ -25,7 +25,7 @@ const bound = (value, min, max, fallback) => {
   return Number.isInteger(number) ? Math.min(max, Math.max(min, number)) : fallback
 }
 
-const monthOf = (ms) => {
+export const monthOf = (ms) => {
   const date = new Date(Number(ms) || Date.now())
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`
 }
@@ -158,7 +158,7 @@ export function readBoard(stateDirectory, { month, offset, limit, now = Date.now
     const monthKey = monthOf(at || now)
     hot.push({ id, ticket, row, month: monthKey })
     monthSet.add(monthKey)
-    hotCount.set(monthKey, (hotCount.get(monthKey) || 0) + 1)
+    if (!index.ids[id]) hotCount.set(monthKey, (hotCount.get(monthKey) || 0) + 1)
   }
   const months = [...monthSet].sort().reverse()
   const selected = typeof month === 'string' && monthSet.has(month) ? month : months[0] || monthOf(now)
@@ -212,6 +212,48 @@ export function readBoard(stateDirectory, { month, offset, limit, now = Date.now
     summary,
     archivedTotal: Object.keys(index.ids).length,
     archivedAt: index.archivedAt,
+  }
+}
+
+/** 归档分片 + 热窗 + 保存索引的合并集合（同票热窗优先），供导出与统计一次性读取。 */
+export function collectLedgerEntries(stateDirectory) {
+  const ledger = readLedger(stateDirectory)
+  const index = readArchiveIndex(stateDirectory)
+  const tickets = new Map(ledgerRows(stateDirectory).map(ticket => [ticket.id, ticket]))
+  const entries = new Map()
+  for (const month of Object.keys(index.months)) {
+    for (const row of Object.values(readShard(stateDirectory, month).rows)) {
+      entries.set(row.id, {
+        archived: true,
+        ticket: { id: row.id, directory: row.directory, group: row.group, day: row.day, savedAt: row.savedAt, fileCount: row.fileCount },
+        row,
+      })
+    }
+  }
+  for (const [id, row] of Object.entries(ledger.rows)) {
+    const ticket = tickets.get(id) || { id, directory: row.directory, group: '', day: '', savedAt: row.updatedAt || 0, fileCount: 0 }
+    entries.set(id, { archived: false, ticket, row })
+  }
+  // 尚未识别的归档票也要计入台账（与台账页同口径）；归档分片里的票只在分片读取。
+  for (const ticket of tickets.values()) {
+    if (entries.has(ticket.id) || index.ids[ticket.id]) continue
+    entries.set(ticket.id, { archived: false, ticket, row: undefined })
+  }
+  return { ledger, index, entries: [...entries.values()] }
+}
+
+const bySavedAt = (left, right) =>
+  (Number(right.ticket.savedAt) || 0) - (Number(left.ticket.savedAt) || 0) || String(left.ticket.id).localeCompare(String(right.ticket.id))
+
+/** 导出用全量视图：归档分片 + 热窗（同票以热窗为准），只用于一次性导出。 */
+export function readAllRows(stateDirectory) {
+  const config = readLedgerConfig(stateDirectory)
+  if (!config) return { configured: false, columns: [], rows: [] }
+  const { entries } = collectLedgerEntries(stateDirectory)
+  return {
+    configured: true,
+    columns: config.columns,
+    rows: entries.sort(bySavedAt).map(entry => projectTicketRow(config, entry.ticket, entry.row)),
   }
 }
 
